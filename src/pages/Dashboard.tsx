@@ -1,0 +1,242 @@
+import { useState, useEffect } from "react";
+import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
+import ComplianceScore from "@/components/ComplianceScore";
+import { RiskTrendChart, FilingStatusChart, StateComplianceChart, MonthlyActivityChart } from "@/components/DashboardCharts";
+import { DeadlineCards, RiskAlerts, ActivityTimeline } from "@/components/DashboardWidgets";
+import { Users, FileText, ShieldCheck, AlertTriangle, ClipboardList, ArrowRight, Newspaper, Sparkles, Loader2, X, Plug } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
+import { getComplianceScore, getEvaluations } from "@/lib/firestore";
+import { renderMarkdown } from "@/lib/markdown";
+
+const AI_SERVER_URL = import.meta.env.VITE_AI_SERVER_URL || "http://localhost:5000";
+
+const container = { hidden: {}, show: { transition: { staggerChildren: 0.08 } } };
+const item = { hidden: { opacity: 0, y: 15 }, show: { opacity: 1, y: 0 } };
+
+export default function Dashboard() {
+  const { firebaseUser } = useAuth();
+  const [scoreData, setScoreData] = useState<any>(null);
+  const [triggeredRules, setTriggeredRules] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [explaining, setExplaining] = useState(false);
+  const [explanationText, setExplanationText] = useState("");
+
+  useEffect(() => {
+    if (!firebaseUser) return;
+    loadDashboard();
+  }, [firebaseUser]);
+
+  const loadDashboard = async () => {
+    if (!firebaseUser) return;
+    try {
+      const data = await getComplianceScore(firebaseUser.uid);
+      setScoreData(data);
+
+      // Extract triggered rules from evaluations
+      if (data.evals) {
+        const rules = data.evals.flatMap((e: any) =>
+          (e.violations || []).map((v: any) => ({
+            condition: v.description,
+            result: v.reason,
+            severity: v.severity,
+            ruleId: v.ruleId,
+            legalReference: v.legalReference,
+            platform: v.platform,
+          }))
+        );
+        setTriggeredRules(rules);
+      }
+    } catch { }
+    finally { setLoading(false); }
+  };
+
+  const score = scoreData?.hasData ? scoreData.score : 0;
+  const hasData = scoreData?.hasData || false;
+
+  const stats = hasData ? [
+    { label: "Evaluated Platforms", value: String(scoreData.evaluatedPlatforms || 0), icon: "FileText", change: "platforms analyzed" },
+    { label: "Total Violations", value: String(scoreData.totalViolations || 0), icon: "AlertTriangle", change: scoreData.totalViolations > 0 ? "action needed" : "all clear" },
+    { label: "Compliance Score", value: `${score}%`, icon: "ShieldCheck", change: score >= 80 ? "healthy" : score >= 50 ? "needs attention" : "critical" },
+    { label: "Triggered Rules", value: String(triggeredRules.length), icon: "Users", change: "rules flagged" },
+  ] : [
+    { label: "Evaluated Platforms", value: "0", icon: "FileText", change: "no data yet" },
+    { label: "Total Violations", value: "—", icon: "AlertTriangle", change: "" },
+    { label: "Compliance Score", value: "—", icon: "ShieldCheck", change: "" },
+    { label: "Triggered Rules", value: "—", icon: "Users", change: "" },
+  ];
+
+  const iconMap: Record<string, React.ElementType> = { FileText, Users, ShieldCheck, AlertTriangle };
+
+  const explainScore = async () => {
+    setExplaining(true); setExplanationText("");
+    const violations = triggeredRules.map((r: any) => `- [${r.severity}] ${r.ruleId}: ${r.condition} → ${r.result} (${r.legalReference})`).join("\n");
+    const context = `Explain this compliance score with proof:\n\nScore: ${score}/100\nEvaluated Platforms: ${scoreData?.evaluatedPlatforms || 0}\nTriggered Rules:\n${violations || "None"}\n\nProvide: 1) Score breakdown 2) Impact of each violation 3) Improvement steps 4) Priority actions`;
+
+    try {
+      const resp = await fetch(`${AI_SERVER_URL}/api/compliance-ai/explain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context }),
+      });
+      if (!resp.ok || !resp.body) throw new Error("Stream failed");
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "", fullText = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line.startsWith("data: ")) continue;
+          const p = line.slice(6).trim();
+          if (p === "[DONE]") break;
+          try { const j = JSON.parse(p); if (j.word !== undefined) { fullText += j.word; setExplanationText(fullText); } } catch { }
+        }
+      }
+    } catch { setExplanationText("AI explanation unavailable. Ensure the Express server is running with INTEGRATION_GROQ_API_KEY configured."); }
+  };
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-64">
+      <Loader2 className="h-8 w-8 animate-spin text-primary" />
+    </div>
+  );
+
+  return (
+    <motion.div variants={container} initial="hidden" animate="show" className="space-y-6">
+      <motion.div variants={item}>
+        <h1 className="text-2xl font-bold text-foreground">Compliance Dashboard</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          {hasData ? "Live compliance status based on your uploaded data" : "Upload compliance data in Integrations to see live metrics"}
+        </p>
+      </motion.div>
+
+      {/* Stats */}
+      <motion.div variants={item} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {stats.map((s, i) => {
+          const Icon = iconMap[s.icon] || FileText;
+          return (
+            <div key={i} className="glass-card-hover p-4 flex items-center gap-4">
+              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Icon className="h-5 w-5 text-primary" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-foreground">{s.value}</p>
+                <p className="text-xs text-muted-foreground">{s.label}</p>
+                {s.change && <p className="text-[10px] text-primary mt-0.5">{s.change}</p>}
+              </div>
+            </div>
+          );
+        })}
+      </motion.div>
+
+      {/* Score + Deadlines + Alerts */}
+      <motion.div variants={item} className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div className="lg:col-span-3 glass-card p-5 flex flex-col items-center justify-center gap-3">
+          <ComplianceScore score={score} label={hasData ? "Rule-Based Score" : "No Evaluations Yet"} />
+          {hasData && (
+            <button onClick={explainScore} disabled={explaining}
+              className="flex items-center gap-1.5 rounded-lg gradient-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50">
+              {explaining ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+              AI Explain
+            </button>
+          )}
+          {!hasData && (
+            <Link to="/integrations" className="flex items-center gap-1.5 text-xs text-primary hover:underline">
+              <Plug className="h-3 w-3" /> Go to Integrations →
+            </Link>
+          )}
+        </div>
+        <div className="lg:col-span-5"><DeadlineCards /></div>
+        <div className="lg:col-span-4"><RiskAlerts /></div>
+      </motion.div>
+
+      {/* AI Explanation */}
+      {explanationText && (
+        <motion.div variants={item} className="glass-card p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary" />
+              <h3 className="text-sm font-semibold text-foreground">Compliance Score Analysis</h3>
+            </div>
+            <button onClick={() => { setExplaining(false); setExplanationText(""); }} className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary"><X className="h-4 w-4" /></button>
+          </div>
+          <div className="prose prose-sm max-w-none text-foreground/90 text-sm leading-relaxed" dangerouslySetInnerHTML={{ __html: renderMarkdown(explanationText) }} />
+        </motion.div>
+      )}
+
+      {/* Triggered Rules */}
+      {triggeredRules.length > 0 && (
+        <motion.div variants={item} className="glass-card p-5">
+          <h3 className="text-sm font-semibold text-foreground mb-3">Triggered Compliance Rules</h3>
+          <div className="space-y-2">
+            {triggeredRules.map((r: any, i: number) => (
+              <div key={i} className={`flex items-center gap-3 rounded-lg border p-3 ${r.severity === "High" ? "border-destructive/30 bg-destructive/5" : r.severity === "Medium" ? "border-warning/30 bg-warning/5" : "border-border bg-secondary/30"}`}>
+                <AlertTriangle className={`h-4 w-4 shrink-0 ${r.severity === "High" ? "text-destructive" : r.severity === "Medium" ? "text-warning" : "text-muted-foreground"}`} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-foreground truncate">{r.condition}</p>
+                  <p className="text-xs text-muted-foreground">{r.result}</p>
+                </div>
+                <span className="text-[10px] font-mono text-muted-foreground shrink-0">{r.ruleId}</span>
+              </div>
+            ))}
+          </div>
+        </motion.div>
+      )}
+
+      {/* Charts */}
+      <motion.div variants={item} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <RiskTrendChart />
+        <FilingStatusChart />
+        <StateComplianceChart />
+        <MonthlyActivityChart />
+      </motion.div>
+
+      {/* CTAs */}
+      <motion.div variants={item}>
+        <Link to="/integrations" className="glass-card-hover p-5 flex items-center gap-4 group block">
+          <div className="h-12 w-12 rounded-xl gradient-primary flex items-center justify-center shrink-0">
+            <Plug className="h-6 w-6 text-primary-foreground" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-bold text-foreground">Integrations & Compliance Engine</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">Upload your compliance data to run the rule engine and update your score dynamically</p>
+          </div>
+          <ArrowRight className="h-5 w-5 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+        </Link>
+      </motion.div>
+
+      <motion.div variants={item}>
+        <Link to="/compliance-checker" className="glass-card-hover p-5 flex items-center gap-4 group block">
+          <div className="h-12 w-12 rounded-xl gradient-primary flex items-center justify-center shrink-0">
+            <ClipboardList className="h-6 w-6 text-primary-foreground" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-bold text-foreground">Compliance Checker</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">Enter your business details to instantly discover all applicable compliances, deadlines & penalties</p>
+          </div>
+          <ArrowRight className="h-5 w-5 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+        </Link>
+      </motion.div>
+
+      <motion.div variants={item}><ActivityTimeline /></motion.div>
+
+      <motion.div variants={item}>
+        <Link to="/news-feed" className="glass-card-hover p-5 flex items-center gap-4 group block">
+          <div className="h-12 w-12 rounded-xl gradient-primary flex items-center justify-center shrink-0">
+            <Newspaper className="h-6 w-6 text-primary-foreground" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-bold text-foreground">Regulatory News Feed</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">Enable live regulatory updates — GST amendments, MCA notifications, labour law changes & more</p>
+          </div>
+          <ArrowRight className="h-5 w-5 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+        </Link>
+      </motion.div>
+    </motion.div>
+  );
+}
